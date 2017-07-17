@@ -1,0 +1,249 @@
+#!/usr/bin/python
+# encoding: utf-8
+#
+# Copyright (c) 2017 Dean Jackson <deanishe@deanishe.net>
+#
+# MIT Licence. See http://opensource.org/licenses/MIT
+#
+# Created on 2017-07-16
+#
+
+"""errnum [options] [<query>]
+
+Usage:
+    errnum [--] [<query>]
+    errnum --update
+    errnum -h | --help
+    errnum --version
+
+Options:
+    -u, --update    Update cached error list
+    -h, --help      Show this message and exit
+    --version       Show version number and exit
+
+"""
+
+from __future__ import print_function, absolute_import
+
+from collections import namedtuple
+import os
+import re
+import subprocess
+import sys
+
+import docopt
+from workflow import ICON_INFO, ICON_WARNING, Workflow3
+from workflow.background import is_running, run_in_background
+
+log = None
+
+ErrFile = namedtuple('ErrFile', 'path domain')
+Err = namedtuple('Err', 'number name description file domain')
+
+# Initial values for `settings.json`
+DEFAULT_SETTINGS = {}
+
+# Auto-update from GitHub releases
+UPDATE_SETTINGS = {
+    'github_slug': 'deanishe/alfred-errnum',
+}
+
+HELP_URL = 'https://github.com/deanishe/alfred-errnum/issues'
+
+ICON_UPDATE = 'update-available.png'
+
+LARGETEXT = """\
+Number: {e.number}
+Name: {e.name}
+Domain: {e.domain}
+Description: {e.description}
+File: {e.file}
+"""
+
+# How long to cache list of errors
+MAX_CACHE_AGE = 21600 # 6 hours
+
+# mdfind command to find header files defining errors
+MD_CMD = ['mdfind', '-onlyin', '/System/Library/Frameworks',
+          '(kMDItemDisplayName == "Errors.h"w || '
+          'kMDItemDisplayName == "mig_errors.h") && '
+          'kMDItemDisplayName != "DRCoreErrors.h" && '
+          'kMDItemDisplayName != "NSErrors.h"']
+
+
+def tidy_error(errstr):
+    """Collapse whitespace in ``errstr``."""
+    return re.sub(r'\s+\*?\s*', ' ', errstr)
+
+
+ERROR_FINDERS = [
+    re.compile(r"""
+               \#define\s+?
+               (\w+)\s+?          # name
+               (-?\d+).+?/\*\s+?  # number
+               (.+?)\s*?          # details
+               \*/""", re.VERBOSE | re.DOTALL).findall,
+    re.compile(r"""\s+?
+               (\w+)\s+?=\s+?        # name
+               (\d+),?[ \t]+?//\s*?  # number
+               ([^\n]+)              # details
+               """, re.VERBOSE).findall,
+    re.compile(r"""\s+?
+               (\w+)\s+?=\s+?     # name
+               (\d+),?            # number
+               """, re.VERBOSE).findall,
+]
+
+
+def extract_errors(errfile):
+    """Find all errors defined in ``errfile``.
+
+    Args:
+        errfile (ErrFile): File to search for errors
+
+    Returns:
+        list: Sequence of `Err` tuples
+
+    """
+    errors = []
+    with open(errfile.path) as fp:
+        text = fp.read()
+        for f in ERROR_FINDERS:
+            matches = f(text)
+            if matches:
+                for m in matches:
+                    if len(m) == 3:
+                        name, number, details = m
+                        details = tidy_error(details)
+                    else:
+                        name, number = m
+                        details = ''
+                    err = Err(number, name, details, errfile.path,
+                              errfile.domain)
+                    log.debug(err)
+                    errors.append(err)
+                break
+
+    return errors
+
+
+def load_errors():
+    """Find and parse header files defining errors.
+
+    Returns:
+        list: Sequence of `Err` tuples for all found errors
+
+    """
+    header_files = [
+        ErrFile('/usr/include/mach/kern_return.h', 'Mach'),
+        ErrFile('/usr/include/sys/errno.h', 'POSIX'),
+    ]
+    output = subprocess.check_output(MD_CMD).strip()
+    for line in output.split('\n'):
+        if os.path.exists(line):
+            domain = 'Cocoa'
+            if '/mach/' in line:
+                domain = 'Mach'
+            elif line.endswith('MacErrors.h'):
+                domain = 'Carbon'
+            header_files.append(ErrFile(line, domain))
+
+    errors = []
+    for errfile in header_files:
+        errs = extract_errors(errfile)
+        if not errs:
+            log.warning('no errors found in %s', errfile.path)
+        else:
+            log.info('%d errors in %s', len(errs), errfile.path)
+
+        errors.extend(errs)
+
+    log.info('%d errors loaded from %d files', len(errors), len(header_files))
+    return errors
+
+
+def main(wf):
+    """Run workflow script."""
+    wf.args  # ensure magic args are processed
+    opts = docopt.docopt(__doc__, argv=wf.args, version=wf.version)
+    log.debug('opts=%r', opts)
+
+    # Alternate action -------------------------------------------------
+    if opts['--update']:
+        wf.cache_data('errors', load_errors())
+        return
+
+    # Filter errors ----------------------------------------------------
+    query = (opts.get('<query>') or u'').strip()
+    if not query:
+        query = wf.decode(os.getenv('QUERY', '')).strip()
+
+    # Show workflow update status
+    if wf.update_available:
+        wf.add_item('An update is available',
+                    u'↩ or ⇥ to install',
+                    autocomplete='workflow:update',
+                    icon=ICON_UPDATE,
+                    valid=False)
+
+    # Retrieve cached errors
+    errors = wf.cached_data('errors', None, max_age=0)
+
+    # Update cached errors if necessary
+    if errors is None or not \
+            wf.cached_data_fresh('errors', max_age=MAX_CACHE_AGE):
+        if not is_running('update'):
+            log.debug('updating errors cache...')
+            run_in_background('update', ['./errnum', '--update'])
+            wf.rerun = 0.5
+    else:
+        log.debug('%d known errors', len(errors))
+
+    if is_running('update'):
+        wf.rerun = 0.5
+        wf.add_item(u'Caching errors…', icon=ICON_INFO)
+
+    if not errors:  # exit if there are no data to show/filter
+        wf.send_feedback()
+        return
+
+    if query:
+        errors = wf.filter(query, errors, key=lambda t: t.number, min_score=60)
+
+    if not errors:
+        wf.add_item('No matching errors', icon=ICON_WARNING)
+        wf.send_feedback()
+        return
+
+    # Send results to Alfred
+    for err in errors:
+
+        # Item data
+        subtitle = os.path.basename(err.file)
+        if err.description:
+            subtitle = '{} // {}'.format(err.description, subtitle)
+
+        largetext = LARGETEXT.format(e=err)
+
+        it = wf.add_item(
+            '{e.number} = {e.name}'.format(e=err),
+            subtitle,
+            arg=err.file,
+            largetext=largetext,
+            valid=True,
+            type='file')
+
+        it.setvar('largetext', largetext)
+
+    wf.send_feedback()
+    return 0
+
+
+if __name__ == '__main__':
+    wf = Workflow3(
+        default_settings=DEFAULT_SETTINGS,
+        update_settings=UPDATE_SETTINGS,
+        help_url=HELP_URL,
+    )
+    log = wf.logger
+    sys.exit(wf.run(main))
