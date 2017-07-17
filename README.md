@@ -3,7 +3,7 @@ Alfred Errnum
 
 Alfred 3 workflow to lookup macOS errors.
 
-Extracts errors defined in header files. Search by error number, and view the error name and description.
+Enter the error number to see the name and description of the error, or view the header file that defines it.
 
 
 Usage
