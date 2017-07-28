@@ -10,8 +10,8 @@ Usage
 -----
 
 - `errno [<number>]` — Search errors by number
-    - `↩` or `⌘+<NUM>` — Show error details in Alfred's Large Type window
-        - `⌘+↩` — Reveal header file in Finder
+    - `↩` or `⌘<NUM>` — Show error details in Alfred's Large Type window
+        - `⌘↩` — Reveal header file in Finder
 
 
 Licencing, thanks
