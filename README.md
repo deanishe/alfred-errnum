@@ -3,6 +3,8 @@ Alfred Errnum
 
 Alfred 3 workflow to lookup macOS errors.
 
+![](./demo.gif)
+
 Enter the error number to see the name and description of the error, or view the header file that defines it.
 
 
